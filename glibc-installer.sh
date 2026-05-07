@@ -12,8 +12,11 @@ NODE_VERSION="${NODE_VERSION:-22.22.2}"
 NPM_PREFIX="${NPM_PREFIX:-${PREFIX:-}/lib/node_modules}"
 
 CLAUDE_PKG="@anthropic-ai/claude-code"
+CLAUDE_PLATFORM_PKG="@anthropic-ai/claude-code-linux-arm64"
 OPENCODE_PKG="opencode-ai"
+OPENCODE_PLATFORM_PKG="opencode-linux-arm64"
 CODEX_PKG="@openai/codex"
+CODEX_PLATFORM_PKG="@openai/codex-linux-arm64"
 OPENCLAW_PKG="openclaw"
 
 RED='\033[0;31m'
@@ -320,15 +323,73 @@ npm_root_global() {
   PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" root -g 2>/dev/null || printf '%s/lib/node_modules\n' "$PREFIX"
 }
 
+codex_platform_spec() {
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/node" - <<'NODE'
+const fs = require('fs');
+const pkg = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+const spec = pkg.optionalDependencies && pkg.optionalDependencies['@openai/codex-linux-arm64'];
+if (!spec) process.exit(1);
+process.stdout.write(`@openai/codex-linux-arm64@${spec}`);
+NODE
+}
+
+install_codex_platform_pkg() {
+  local root platform_pkg spec
+  root="$(npm_root_global)"
+  platform_pkg="$root/$CODEX_PLATFORM_PKG"
+  [ -f "$platform_pkg/vendor/aarch64-unknown-linux-musl/codex/codex" ] && return 0
+  spec="$(codex_platform_spec "$root/$CODEX_PKG/package.json")" || fail "Codex platform package spec tidak ditemukan"
+  log "npm install -g $spec"
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$spec"
+}
+
+install_opencode_platform_pkg() {
+  local root platform_pkg version tmp tarball url
+  root="$(npm_root_global)"
+  platform_pkg="$root/$OPENCODE_PLATFORM_PKG"
+  [ -f "$platform_pkg/bin/opencode" ] && return 0
+  version="$(cli_installed_version opencode)"
+  [ "$version" != unknown ] || fail "OpenCode version tidak ditemukan"
+  log "npm install -g $OPENCODE_PLATFORM_PKG@$version"
+  if PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$OPENCODE_PLATFORM_PKG@$version" --ignore-scripts; then
+    return 0
+  fi
+  warn "npm install $OPENCODE_PLATFORM_PKG gagal; coba download tarball langsung"
+  tmp="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/opencode-platform.XXXXXX")"
+  tarball="opencode-linux-arm64-${version}.tgz"
+  url="https://registry.npmjs.org/$OPENCODE_PLATFORM_PKG/-/$tarball"
+  curl -fL --retry 5 --retry-all-errors --connect-timeout 30 "$url" -o "$tmp/$tarball"
+  rm -rf "$platform_pkg"
+  mkdir -p "$platform_pkg"
+  tar -xzf "$tmp/$tarball" -C "$platform_pkg" --strip-components=1
+  rm -rf "$tmp"
+}
+
+install_claude_platform_pkg() {
+  local root platform_pkg version
+  root="$(npm_root_global)"
+  platform_pkg="$root/$CLAUDE_PLATFORM_PKG"
+  [ -f "$platform_pkg/claude" ] && return 0
+  version="$(cli_installed_version claude)"
+  [ "$version" != unknown ] || fail "Claude Code version tidak ditemukan"
+  log "npm install -g $CLAUDE_PLATFORM_PKG@$version"
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$CLAUDE_PLATFORM_PKG@$version" --ignore-scripts
+}
+
 find_claude_bin() {
-  local root pkg p
+  local root pkg platform_pkg p
   root="$(npm_root_global)"
   pkg="$root/$CLAUDE_PKG"
+  platform_pkg="$root/$CLAUDE_PLATFORM_PKG"
   for p in \
-    "$pkg/bin/claude.exe" \
+    "$platform_pkg/claude" \
     "$pkg/node_modules/@anthropic-ai/claude-code-linux-arm64/claude" \
-    "$pkg/node_modules/@anthropic-ai/claude-code-linux-arm64/claude.exe"; do
-    [ -f "$p" ] && { printf '%s\n' "$p"; return 0; }
+    "$pkg/node_modules/@anthropic-ai/claude-code-linux-arm64/claude.exe" \
+    "$pkg/bin/claude.exe"; do
+    [ -f "$p" ] || continue
+    [ "$(file -b "$p" 2>/dev/null | cut -d' ' -f1)" = ELF ] || continue
+    printf '%s\n' "$p"
+    return 0
   done
   return 1
 }
@@ -354,7 +415,8 @@ EOF
 }
 
 write_node_cli_wrapper() {
-  local name="$1" script="$2" target="$PREFIX/bin/$name"
+  local name="$1" script="$2" target
+  target="$PREFIX/bin/$name"
   rm -f "$target"
   cat > "$target" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
@@ -365,39 +427,55 @@ EOF
 }
 
 repair_claude() {
-  install_glibc_runner
+  install_node
+  install_claude_platform_pkg || true
   local bin
   bin="$(find_claude_bin || true)"
-  [ -n "$bin" ] || fail "Claude Code binary tidak ditemukan. Jalankan: bash glibc-installer.sh install --claude"
+  [ -n "$bin" ] || fail "Claude Code native binary tidak ditemukan. Jalankan: bash glibc-installer.sh install --claude"
   write_native_wrapper claude "$bin"
   "$PREFIX/bin/claude" --version || true
 }
 
 repair_opencode() {
   install_node
-  local root pkg script
+  local root pkg platform_pkg native script p
   root="$(npm_root_global)"
   pkg="$root/$OPENCODE_PKG"
+  platform_pkg="$root/$OPENCODE_PLATFORM_PKG"
+  native=""
   script=""
+  for p in "$platform_pkg/bin/opencode" "$pkg/bin/.opencode"; do
+    [ -f "$p" ] && { native="$p"; break; }
+  done
   for p in "$pkg/bin/opencode" "$pkg/bin/opencode.js" "$pkg/dist/index.js" "$pkg/index.js"; do
     [ -f "$p" ] && { script="$p"; break; }
   done
-  [ -n "$script" ] || fail "OpenCode tidak ditemukan. Jalankan: bash glibc-installer.sh install --opencode"
-  write_node_cli_wrapper opencode "$script"
+  if [ -n "$native" ]; then
+    write_native_wrapper opencode "$native"
+  elif [ -n "$script" ]; then
+    write_node_cli_wrapper opencode "$script"
+  else
+    fail "OpenCode tidak ditemukan. Jalankan: bash glibc-installer.sh install --opencode"
+  fi
   "$PREFIX/bin/opencode" --version || true
 }
 
 repair_codex() {
   install_node
-  local root pkg script native p
+  local root pkg platform_pkg script native p
   root="$(npm_root_global)"
   pkg="$root/$CODEX_PKG"
+  platform_pkg="$root/$CODEX_PLATFORM_PKG"
   script=""
   native=""
   for p in "$pkg/bin/codex" "$pkg/bin/codex.js" "$pkg/dist/cli.js" "$pkg/index.js"; do
     [ -f "$p" ] && { script="$p"; break; }
   done
-  for p in "$pkg"/bin/*.bin "$pkg"/vendor/*/codex "$pkg"/node_modules/*/codex; do
+  for p in \
+    "$pkg"/bin/*.bin \
+    "$pkg"/vendor/*/codex \
+    "$pkg"/node_modules/*/codex \
+    "$platform_pkg"/vendor/aarch64-unknown-linux-musl/codex/codex; do
     [ -f "$p" ] && { native="$p"; break; }
   done
   if [ -n "$native" ]; then
@@ -449,6 +527,33 @@ cli_installed() {
   [ -d "$root/$pkg" ]
 }
 
+cli_installed_version() {
+  local root pkg
+  root="$(npm_root_global 2>/dev/null || printf '%s/lib/node_modules\n' "$PREFIX")"
+  pkg="$(cli_pkg_name "$1")"
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/node" -e "const fs=require('fs'); const p=process.argv[1]; if (!fs.existsSync(p)) process.exit(1); process.stdout.write(JSON.parse(fs.readFileSync(p,'utf8')).version || 'unknown');" "$root/$pkg/package.json" 2>/dev/null || printf '%s' unknown
+}
+
+cli_latest_version() {
+  local pkg
+  pkg="$(cli_pkg_name "$1")"
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" view "$pkg@latest" version 2>/dev/null || printf '%s' unknown
+}
+
+cli_update_status() {
+  local name="$1" installed latest
+  cli_installed "$name" || { printf '%s\n' missing; return 0; }
+  installed="$(cli_installed_version "$name")"
+  latest="$(cli_latest_version "$name")"
+  if [ "$latest" = unknown ] || [ -z "$latest" ]; then
+    printf 'installed:%s latest:unknown\n' "$installed"
+  elif [ "$installed" = "$latest" ]; then
+    printf 'installed:%s latest:%s up_to_date\n' "$installed" "$latest"
+  else
+    printf 'installed:%s latest:%s update_available\n' "$installed" "$latest"
+  fi
+}
+
 cli_wrapper_exists() {
   local name="$1" target="$PREFIX/bin/$1"
   [ -f "$target" ] || return 1
@@ -474,11 +579,22 @@ cli_status() {
   fi
 }
 
+cli_status_with_update() {
+  local name="$1" status update
+  status="$(cli_status "$name")"
+  if [ "$status" = ok ]; then
+    update="$(cli_update_status "$name")"
+    printf '%s (%s)\n' "$status" "$update"
+  else
+    printf '%s\n' "$status"
+  fi
+}
+
 install_one_cli() {
   case "$1" in
-    claude) npm_install_global "$CLAUDE_PKG@latest"; repair_claude ;;
-    opencode) npm_install_global "$OPENCODE_PKG@latest"; repair_opencode ;;
-    codex) npm_install_global "$CODEX_PKG@latest"; repair_codex ;;
+    claude) npm_install_global "$CLAUDE_PKG@latest"; install_claude_platform_pkg || true; repair_claude ;;
+    opencode) npm_install_global "$OPENCODE_PKG@latest"; install_opencode_platform_pkg || true; repair_opencode ;;
+    codex) npm_install_global "$CODEX_PKG@latest"; install_codex_platform_pkg; repair_codex ;;
     openclaw) npm_install_global "$OPENCLAW_PKG@latest"; repair_openclaw ;;
   esac
   fix_global_shebangs
@@ -528,9 +644,9 @@ install_selected_tools() {
     shift
   done
 
-  $do_claude && { npm_install_global "$CLAUDE_PKG@latest"; repair_claude; }
-  $do_opencode && { npm_install_global "$OPENCODE_PKG@latest"; repair_opencode; }
-  $do_codex && { npm_install_global "$CODEX_PKG@latest"; repair_codex; }
+  $do_claude && { npm_install_global "$CLAUDE_PKG@latest"; install_claude_platform_pkg || true; repair_claude; }
+  $do_opencode && { npm_install_global "$OPENCODE_PKG@latest"; install_opencode_platform_pkg || true; repair_opencode; }
+  $do_codex && { npm_install_global "$CODEX_PKG@latest"; install_codex_platform_pkg; repair_codex; }
   $do_openclaw && { npm_install_global "$OPENCLAW_PKG@latest"; repair_openclaw; }
   fix_global_shebangs
 }
@@ -595,7 +711,7 @@ status_main() {
   echo "NPM=$([ -x "$BIN_DIR/npm" ] && "$BIN_DIR/npm" --version || echo missing)"
   for c in claude codex opencode openclaw; do
     printf '%s=' "$c"
-    cli_status "$c" 2>/dev/null || echo missing
+    cli_status_with_update "$c" 2>/dev/null || echo missing
   done
 }
 
@@ -661,7 +777,9 @@ cli_detail_menu() {
     action="$(cli_action_label "$status" "$label")"
     menu_header
     printf '%s\n' "$label"
-    printf 'Status: %s\n\n' "$status"
+    printf 'Status: %s\n' "$status"
+    [ "$status" = ok ] && printf 'Update: %s\n' "$(cli_update_status "$name")"
+    printf '\n'
     cat <<MENU
 1. Check Linker
 2. $action
