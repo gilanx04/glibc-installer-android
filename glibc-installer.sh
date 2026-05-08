@@ -337,8 +337,8 @@ install_codex_platform_pkg() {
   local root platform_pkg spec
   root="$(npm_root_global)"
   platform_pkg="$root/$CODEX_PLATFORM_PKG"
-  [ -f "$platform_pkg/vendor/aarch64-unknown-linux-musl/codex/codex" ] && return 0
   spec="$(codex_platform_spec "$root/$CODEX_PKG/package.json")" || fail "Codex platform package spec tidak ditemukan"
+  [ -f "$platform_pkg/vendor/aarch64-unknown-linux-musl/codex/codex" ] && [ "$(cli_platform_installed_version "$CODEX_PLATFORM_PKG")" = "${spec##*@}" ] && return 0
   log "npm install -g $spec"
   PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$spec"
 }
@@ -347,8 +347,8 @@ install_opencode_platform_pkg() {
   local root platform_pkg version tmp tarball url
   root="$(npm_root_global)"
   platform_pkg="$root/$OPENCODE_PLATFORM_PKG"
-  [ -f "$platform_pkg/bin/opencode" ] && return 0
   version="$(cli_installed_version opencode)"
+  [ -f "$platform_pkg/bin/opencode" ] && [ "$(cli_platform_installed_version "$OPENCODE_PLATFORM_PKG")" = "$version" ] && return 0
   [ "$version" != unknown ] || fail "OpenCode version tidak ditemukan"
   log "npm install -g $OPENCODE_PLATFORM_PKG@$version"
   if PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$OPENCODE_PLATFORM_PKG@$version" --ignore-scripts; then
@@ -369,8 +369,8 @@ install_claude_platform_pkg() {
   local root platform_pkg version
   root="$(npm_root_global)"
   platform_pkg="$root/$CLAUDE_PLATFORM_PKG"
-  [ -f "$platform_pkg/claude" ] && return 0
   version="$(cli_installed_version claude)"
+  [ -f "$platform_pkg/claude" ] && [ "$(cli_platform_installed_version "$CLAUDE_PLATFORM_PKG")" = "$version" ] && return 0
   [ "$version" != unknown ] || fail "Claude Code version tidak ditemukan"
   log "npm install -g $CLAUDE_PLATFORM_PKG@$version"
   PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" install -g "$CLAUDE_PLATFORM_PKG@$version" --ignore-scripts
@@ -475,6 +475,7 @@ repair_codex() {
     "$pkg"/bin/*.bin \
     "$pkg"/vendor/*/codex \
     "$pkg"/node_modules/*/codex \
+    "$pkg"/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/codex/codex \
     "$platform_pkg"/vendor/aarch64-unknown-linux-musl/codex/codex; do
     [ -f "$p" ] && { native="$p"; break; }
   done
@@ -531,6 +532,13 @@ cli_installed_version() {
   local root pkg
   root="$(npm_root_global 2>/dev/null || printf '%s/lib/node_modules\n' "$PREFIX")"
   pkg="$(cli_pkg_name "$1")"
+  PATH="$BIN_DIR:$PATH" "$BIN_DIR/node" -e "const fs=require('fs'); const p=process.argv[1]; if (!fs.existsSync(p)) process.exit(1); process.stdout.write(JSON.parse(fs.readFileSync(p,'utf8')).version || 'unknown');" "$root/$pkg/package.json" 2>/dev/null || printf '%s' unknown
+}
+
+cli_platform_installed_version() {
+  local root pkg
+  root="$(npm_root_global 2>/dev/null || printf '%s/lib/node_modules\n' "$PREFIX")"
+  pkg="$1"
   PATH="$BIN_DIR:$PATH" "$BIN_DIR/node" -e "const fs=require('fs'); const p=process.argv[1]; if (!fs.existsSync(p)) process.exit(1); process.stdout.write(JSON.parse(fs.readFileSync(p,'utf8')).version || 'unknown');" "$root/$pkg/package.json" 2>/dev/null || printf '%s' unknown
 }
 
