@@ -382,9 +382,9 @@ find_claude_bin() {
   pkg="$root/$CLAUDE_PKG"
   platform_pkg="$root/$CLAUDE_PLATFORM_PKG"
   for p in \
-    "$platform_pkg/claude" \
     "$pkg/node_modules/@anthropic-ai/claude-code-linux-arm64/claude" \
     "$pkg/node_modules/@anthropic-ai/claude-code-linux-arm64/claude.exe" \
+    "$platform_pkg/claude" \
     "$pkg/bin/claude.exe"; do
     [ -f "$p" ] || continue
     [ "$(file -b "$p" 2>/dev/null | cut -d' ' -f1)" = ELF ] || continue
