@@ -395,11 +395,13 @@ find_claude_bin() {
 }
 
 write_native_wrapper() {
-  local name="$1" bin="$2" ldso libpath target
+  local name="$1" bin="$2" ldso libpath target compat_link
   ldso="$(find_ldso)"
   libpath="$(dirname "$ldso")"
-  target="$PREFIX/bin/$name"
+  target="$BIN_DIR/$name"
+  compat_link="$PREFIX/bin/$name"
   chmod +x "$bin" 2>/dev/null || true
+  mkdir -p "$BIN_DIR"
   rm -f "$target"
   cat > "$target" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
@@ -411,18 +413,24 @@ export TEMP="\$TMPDIR"
 exec "$ldso" --library-path "$libpath" "$bin" "\$@"
 EOF
   chmod +x "$target"
+  rm -f "$compat_link"
+  ln -sf "$target" "$compat_link"
   log "wrapper $name -> $bin"
 }
 
 write_node_cli_wrapper() {
-  local name="$1" script="$2" target
-  target="$PREFIX/bin/$name"
+  local name="$1" script="$2" target compat_link
+  target="$BIN_DIR/$name"
+  compat_link="$PREFIX/bin/$name"
+  mkdir -p "$BIN_DIR"
   rm -f "$target"
   cat > "$target" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 exec "$BIN_DIR/node" "$script" "\$@"
 EOF
   chmod +x "$target"
+  rm -f "$compat_link"
+  ln -sf "$target" "$compat_link"
   log "wrapper $name -> $script"
 }
 
@@ -563,15 +571,22 @@ cli_update_status() {
 }
 
 cli_wrapper_exists() {
-  local name="$1" target="$PREFIX/bin/$1"
-  [ -f "$target" ] || return 1
-  grep -qE 'glibc-installer-android|ld-linux|\.glibc-installer-android/bin/node' "$target" 2>/dev/null
+  local name="$1" target
+  target="$BIN_DIR/$name"
+  if [ -f "$target" ] && grep -qE 'glibc-installer-android|ld-linux|\.glibc-installer-android/bin/node' "$target" 2>/dev/null; then
+    return 0
+  fi
+  target="$PREFIX/bin/$1"
+  [ -f "$target" ] && grep -qE 'glibc-installer-android|ld-linux|\.glibc-installer-android/bin/node' "$target" 2>/dev/null
 }
 
 cli_works() {
-  local name="$1"
-  [ -x "$PREFIX/bin/$name" ] || return 1
-  "$PREFIX/bin/$name" --version >/dev/null 2>&1
+  local name="$1" bin
+  for bin in "$BIN_DIR/$name" "$PREFIX/bin/$name"; do
+    [ -x "$bin" ] || continue
+    "$bin" --version >/dev/null 2>&1 && return 0
+  done
+  return 1
 }
 
 cli_status() {
@@ -626,7 +641,7 @@ uninstall_one_cli() {
   root="$(npm_root_global)"
   log "uninstall $label"
   PATH="$BIN_DIR:$PATH" "$BIN_DIR/npm" uninstall -g "$pkg" || true
-  rm -f "$PREFIX/bin/$name"
+  rm -f "$PREFIX/bin/$name" "$BIN_DIR/$name"
 }
 
 fix_global_shebangs() {
